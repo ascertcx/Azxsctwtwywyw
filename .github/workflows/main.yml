@@ -1,0 +1,135 @@
+name: Ultimate RDP Setup
+on:
+  workflow_dispatch:
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+    steps:
+    - name: Checkout and Initialize
+      run: Write-Host "Starting RDP Setup Process..."
+      
+    - name: Configure Core RDP and Performance
+      run: |
+        # Enable RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+        
+        # Firewall configuration
+        netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes
+        netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+        
+        # Restart Terminal Services
+        Restart-Service -Name TermService -Force
+        Start-Sleep -Seconds 10
+
+    - name: Create RDP User
+      run: |
+        $username = "ADMINSUPER"
+        $password = "UltraRdp@2025!"
+        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        # Create user if not exists
+        if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -FullName "Admin Super User"
+            Write-Host "User $username created successfully"
+        } else {
+            Write-Host "User $username already exists"
+        }
+        
+        # Add to groups
+        Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+        
+        Write-Host "User configuration completed"
+
+    - name: Install Tailscale
+      run: |
+        try {
+            $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+            $installerPath = "$env:TEMP\tailscale.msi"
+            
+            # Download and install Tailscale
+            Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+            Start-Process msiexec.exe -ArgumentList @("/i", "`"$installerPath`"", "/quiet", "/norestart") -Wait -NoNewWindow
+            Start-Sleep -Seconds 15
+            
+            # Verify installation
+            if (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe") {
+                Write-Host "Tailscale installed successfully"
+            } else {
+                Write-Error "Tailscale installation failed"
+                exit 1
+            }
+        }
+        catch {
+            Write-Error "Failed to install Tailscale: $($_.Exception.Message)"
+            exit 1
+        }
+
+    - name: Establish Tailscale Connection
+      run: |
+        try {
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID --accept-routes
+            Start-Sleep -Seconds 10
+            
+            $tsIP = $null
+            $maxRetries = 12
+            $retryCount = 0
+            
+            while ($retryCount -lt $maxRetries) {
+                $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+                if ($tsIP -and $tsIP -ne "") {
+                    Write-Host "Tailscale IP: $tsIP"
+                    echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+                    break
+                }
+                $retryCount++
+                Write-Host "Waiting for Tailscale IP... Attempt $retryCount/$maxRetries"
+                Start-Sleep -Seconds 5
+            }
+            
+            if (-not $tsIP) {
+                Write-Error "Failed to get Tailscale IP after $maxRetries attempts"
+                exit 1
+            }
+        }
+        catch {
+            Write-Error "Tailscale connection failed: $($_.Exception.Message)"
+            exit 1
+        }
+
+    - name: Final RDP Configuration
+      run: |
+        # Final RDP adjustments
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Restart-Service -Name TermService -Force
+        
+        Write-Host "RDP configuration completed successfully"
+
+    - name: Display Connection Information
+      run: |
+        Write-Host ""
+        Write-Host "================================================"
+        Write-Host "🎯 RDP CONNECTION READY"
+        Write-Host "================================================"
+        Write-Host "IP Address: $env:TAILSCALE_IP"
+        Write-Host "Username: ADMINSUPER"
+        Write-Host "Password: UltraRdp@2025!"
+        Write-Host "Port: 3389"
+        Write-Host "================================================"
+        Write-Host ""
+
+    - name: Keep Alive
+      run: |
+        Write-Host "RDP session is active and waiting for connections..."
+        Write-Host "This workflow will timeout after 60 minutes"
+        
+        # Keep the workflow running
+        $startTime = Get-Date
+        while ($true) {
+            $elapsed = (Get-Date) - $startTime
+            Write-Host "[$(Get-Date)] RDP Active - Elapsed: $([math]::Round($elapsed.TotalMinutes, 1)) minutes"
+            Start-Sleep -Seconds 60
+        }
